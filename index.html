@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clima en Tiempo Real</title>
+  </head>
+  <body>
+    <h2>Consulta del Clima</h2>
+    <p id="status">Obteniendo ubicación...</p>
+    <p id="weather"></p>
+    <p id="timer">
+      Próxima actualización en: <span id="countdown">5</span> segundos
+    </p>
+    <p id="constantUpdate">
+      Información actualizada: <span id="updatedInfo">Cargando...</span>
+    </p>
+
+    <script>
+      let countdown = 5;
+      let socket = null;
+      const countdownElement = document.getElementById("countdown");
+      const updatedInfoElement = document.getElementById("updatedInfo");
+      const weatherElement = document.getElementById("weather");
+      const UPDATE_INTERVAL = 5000; // 5 segundos
+
+      function initializeWebSocket() {
+        if (socket) {
+          socket.close();
+        }
+
+        socket = new WebSocket("ws://localhost:8000/ws/weather");
+
+        socket.onopen = () => {
+          getWeather();
+        };
+
+        socket.onmessage = (event) => {
+          const weatherData = JSON.parse(event.data);
+          if (weatherData.error) {
+            document.getElementById("status").innerText =
+              "Error: " + weatherData.error;
+          } else {
+            document.getElementById("status").innerText = "Ubicación detectada";
+            updateWeatherInfo(weatherData);
+            resetCountdown();
+          }
+        };
+
+        socket.onerror = () => {
+          document.getElementById("status").innerText =
+            "Error de conexión con el servidor.";
+        };
+
+        socket.onclose = () => {
+          setTimeout(initializeWebSocket, 3000);
+        };
+      }
+
+      function getWeather() {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+              const data = {
+                lat: position.coords.latitude,
+                lon: position.coords.longitude,
+              };
+              socket.send(JSON.stringify(data));
+            }
+          },
+          (error) => {
+            document.getElementById("status").innerText =
+              "Error al obtener ubicación.";
+          }
+        );
+      }
+
+      function startCountdown() {
+        return setInterval(() => {
+          if (countdown > 0) {
+            countdown--;
+            countdownElement.innerText = countdown;
+          }
+        }, 1000);
+      }
+
+      function resetCountdown() {
+        countdown = 5;
+        countdownElement.innerText = countdown;
+      }
+
+      function updateWeatherInfo(weatherData) {
+        const temp = weatherData.main.temp;
+        const condition = weatherData.weather[0].description;
+        weatherElement.innerText = `🌡️ Temperatura: ${temp}°C | ☁️ Clima: ${condition}`;
+
+        updateConstantInfo(weatherData);
+      }
+
+      function updateConstantInfo(weatherData) {
+        const currentTime = new Date().toLocaleTimeString();
+        updatedInfoElement.innerText = `Última actualización: ${currentTime} | Clima: ${weatherData.weather[0].description}`;
+      }
+
+      function initialize() {
+        initializeWebSocket();
+
+        startCountdown();
+
+        setInterval(() => {
+          getWeather();
+        }, UPDATE_INTERVAL);
+      }
+
+      initialize();
+    </script>
+  </body>
+</html>
