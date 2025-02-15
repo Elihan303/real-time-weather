@@ -8,8 +8,8 @@ API_KEY = "b71357df24d6ddeaaecb68dd63cfd995"  # OpenWeatherMap API Key
 app = FastAPI()
 
 # Límite de conexiones simultáneas
-MAX_CONNECTIONS = 3
-active_connections = []  # Lista para rastrear conexiones activas
+MAX_CONNECTIONS = 2
+semaphore = asyncio.Semaphore(MAX_CONNECTIONS)  # Semáforo para controlar conexiones
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Función para obtener el clima
 async def fetch_weather(lat: float, lon: float):
+    """
+    Obtiene los datos del clima desde la API de OpenWeatherMap.
+    """
     await asyncio.sleep(1)  # Simular latencia
     URL = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&units=metric&appid={API_KEY}"
 
@@ -31,18 +34,21 @@ async def fetch_weather(lat: float, lon: float):
 
 @app.websocket("/ws/weather")
 async def weather_endpoint(websocket: WebSocket):
+    """
+    Endpoint WebSocket para obtener datos meteorológicos.
+    """
     # Verificar si se ha alcanzado el máximo de conexiones
-    if len(active_connections) >= MAX_CONNECTIONS:
+    if semaphore.locked():
         await websocket.accept()
         await websocket.send_json({"error": "max_connections_reached"})
         await websocket.close()
         logger.warning("Máximo de conexiones alcanzado. Rechazando solicitud.")
         return
 
-    # Aceptar la conexión y agregarla a la lista de conexiones activas
+    # Adquirir el semáforo antes de aceptar la conexión
+    await semaphore.acquire()
     await websocket.accept()
-    active_connections.append(websocket)
-    logger.info(f"Nueva conexión WebSocket aceptada. Conexiones activas: {len(active_connections)}")
+    logger.info(f"Nueva conexión WebSocket aceptada. Conexiones activas: {MAX_CONNECTIONS - semaphore._value}")
 
     try:
         while True:
@@ -64,12 +70,15 @@ async def weather_endpoint(websocket: WebSocket):
         logger.error(f"Error en la conexión WebSocket: {e}")
         await websocket.send_json({"error": "Internal server error"})
     finally:
-        # Remover la conexión de la lista de conexiones activas
-        active_connections.remove(websocket)
-        logger.info(f"Conexión WebSocket removida. Conexiones activas: {len(active_connections)}")
+        # Liberar el semáforo cuando la conexión se cierra
+        semaphore.release()
+        logger.info(f"Conexión WebSocket liberada. Conexiones activas: {MAX_CONNECTIONS - semaphore._value}")
 
 @app.get("/status")
 def status():
+    """
+    Endpoint para verificar el estado de la API.
+    """
     return {"status": "API en ejecución"}
 
 if __name__ == "__main__":
