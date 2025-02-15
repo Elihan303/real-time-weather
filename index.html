@@ -4,17 +4,39 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clima en Tiempo Real</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"
+    />
+    <style>
+      .weather-info {
+        font-size: 1.2em;
+        font-weight: bold;
+      }
+      #retryButton {
+        display: none;
+        margin-top: 10px;
+      }
+      #error-message {
+        color: red;
+        display: none;
+      }
+    </style>
   </head>
   <body>
     <h2>Consulta del Clima</h2>
-    <p id="status">Obteniendo ubicación...</p>
-    <p id="weather"></p>
+    <p id="status" aria-live="polite">Obteniendo ubicación...</p>
+    <p id="weather" class="weather-info" aria-live="polite"></p>
+    <p id="error-message">
+      Servidor ocupado. Por favor, inténtelo de nuevo más tarde.
+    </p>
     <p id="timer">
       Próxima actualización en: <span id="countdown">5</span> segundos
     </p>
     <p id="constantUpdate">
       Información actualizada: <span id="updatedInfo">Cargando...</span>
     </p>
+    <button id="retryButton">Reintentar geolocalización</button>
 
     <script>
       let countdown = 5;
@@ -22,10 +44,12 @@
       const countdownElement = document.getElementById("countdown");
       const updatedInfoElement = document.getElementById("updatedInfo");
       const weatherElement = document.getElementById("weather");
+      const errorMessageElement = document.getElementById("error-message");
+      const retryButton = document.getElementById("retryButton");
       const UPDATE_INTERVAL = 5000; // 5 segundos
 
       function initializeWebSocket() {
-        if (socket) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
           socket.close();
         }
 
@@ -36,24 +60,33 @@
         };
 
         socket.onmessage = (event) => {
-          const weatherData = JSON.parse(event.data);
-          if (weatherData.error) {
+          const data = JSON.parse(event.data);
+
+          if (data.error === "max_connections_reached") {
+            errorMessageElement.style.display = "block";
+            document.getElementById("status").innerText = "Servidor ocupado";
+            weatherElement.innerText = "";
+            countdownElement.innerText = "0";
+          } else if (data.error) {
+            errorMessageElement.style.display = "none";
             document.getElementById("status").innerText =
-              "Error: " + weatherData.error;
+              "Error: " + data.error;
           } else {
+            errorMessageElement.style.display = "none";
             document.getElementById("status").innerText = "Ubicación detectada";
-            updateWeatherInfo(weatherData);
+            updateWeatherInfo(data);
             resetCountdown();
           }
         };
 
         socket.onerror = () => {
           document.getElementById("status").innerText =
-            "Error de conexión con el servidor.";
+            "Error de conexión. Por favor, inténtelo de nuevo más tarde.";
         };
 
         socket.onclose = () => {
-          setTimeout(initializeWebSocket, 3000);
+          document.getElementById("status").innerText = "Reconectando...";
+          setTimeout(initializeWebSocket, 3000); // Reintentar conexión después de 3 segundos
         };
       }
 
@@ -70,7 +103,8 @@
           },
           (error) => {
             document.getElementById("status").innerText =
-              "Error al obtener ubicación.";
+              "Error al obtener ubicación. Por favor, permita el acceso a la geolocalización.";
+            retryButton.style.display = "block";
           }
         );
       }
@@ -91,9 +125,23 @@
 
       function updateWeatherInfo(weatherData) {
         const temp = weatherData.main.temp;
-        const condition = weatherData.weather[0].description;
-        weatherElement.innerText = `🌡️ Temperatura: ${temp}°C | ☁️ Clima: ${condition}`;
+        const condition = weatherData.weather[0].main.toLowerCase();
+        let icon = "☁️"; // Ícono por defecto
 
+        if (condition.includes("clear")) {
+          icon = "☀️";
+        } else if (condition.includes("rain")) {
+          icon = "🌧️";
+        } else if (condition.includes("cloud")) {
+          icon = "☁️";
+        }
+
+        weatherElement.innerHTML = `${icon} Temperatura: ${temp}°C | Clima: ${condition}`;
+
+        // Guardar en localStorage
+        localStorage.setItem("lastWeatherData", JSON.stringify(weatherData));
+
+        // Actualizar información constante
         updateConstantInfo(weatherData);
       }
 
@@ -103,13 +151,20 @@
       }
 
       function initialize() {
+        // Cargar datos guardados
+        const lastWeatherData = localStorage.getItem("lastWeatherData");
+        if (lastWeatherData) {
+          updateWeatherInfo(JSON.parse(lastWeatherData));
+        }
+
         initializeWebSocket();
-
         startCountdown();
+        setInterval(getWeather, UPDATE_INTERVAL);
 
-        setInterval(() => {
+        retryButton.addEventListener("click", () => {
+          retryButton.style.display = "none";
           getWeather();
-        }, UPDATE_INTERVAL);
+        });
       }
 
       initialize();
