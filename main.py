@@ -18,6 +18,34 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+async def handle_websocket_connection(websocket: WebSocket, connection_count: int = 0):
+    try:
+        data = await websocket.receive_text()
+        location = json.loads(data)
+        weather_data = await fetch_weather(location["lat"], location["lon"])
+        if "error" in weather_data:
+            await websocket.send_json({"error": f"Failed to fetch weather data {weather_data['error']}"})
+        else:
+            await websocket.send_json(weather_data)
+            # Guardar el reporte en la base de datos
+            await save_weather_data(weather_data, location["lat"], location["lon"])
+            # Emitir evento de guardado exitoso
+            await websocket.send_json({"event": "weather_saved", "message": "Reporte de clima guardado exitosamente."})
+        logger.info("Datos del clima enviados y guardados.")
+        await handle_websocket_connection(websocket, connection_count + 1)
+
+    except WebSocketDisconnect:
+        logger.info("Conexión WebSocket cerrada.")
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decodificando JSON: {e}")
+        await websocket.send_json({"error": "Formato JSON inválido"})
+    except Exception as e:
+        logger.error(f"Error en WebSocket: {e}")
+        await websocket.send_json({"error": "Internal server error"})
+    finally:
+        semaphore.release()
+        logger.info(f"Conexión WebSocket liberada. Conexiones activas: {MAX_CONNECTIONS - semaphore._value}")
+        
 # Función para obtener el clima
 async def fetch_weather(lat: float, lon: float):
     await asyncio.sleep(1)  # Simula latencia

@@ -37,6 +37,7 @@
       Información actualizada: <span id="updatedInfo">Cargando...</span>
     </p>
     <button id="retryButton">Reintentar geolocalización</button>
+    <button id="disconnectButton">Desconectar</button>
 
     <script>
       let countdown = 5;
@@ -46,6 +47,7 @@
       const weatherElement = document.getElementById("weather");
       const errorMessageElement = document.getElementById("error-message");
       const retryButton = document.getElementById("retryButton");
+      const disconnectButton = document.getElementById("disconnectButton");
       const UPDATE_INTERVAL = 5000; // 5 segundos
 
       function initializeWebSocket() {
@@ -57,12 +59,21 @@
 
         socket.onopen = () => {
           getWeather();
+
+          // Disparar evento personalizado de reconexión
+          const reconnectEvent = new CustomEvent("reconnect", {
+            detail: { message: "Reconexión exitosa al servidor WebSocket" },
+          });
+          document.dispatchEvent(reconnectEvent);
         };
 
         socket.onmessage = (event) => {
           const data = JSON.parse(event.data);
 
-          if (data.error === "max_connections_reached") {
+          if (data.event === "weather_saved") {
+            // Manejar evento de guardado exitoso
+            document.getElementById("status").innerText = data.message;
+          } else if (data.error === "max_connections_reached") {
             errorMessageElement.style.display = "block";
             document.getElementById("status").innerText = "Servidor ocupado";
             weatherElement.innerText = "";
@@ -164,6 +175,19 @@
         retryButton.addEventListener("click", () => {
           retryButton.style.display = "none";
           getWeather();
+        });
+
+        disconnectButton.addEventListener("click", () => {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.close();
+            document.getElementById("status").innerText = "Conexión cerrada.";
+          }
+        });
+
+        // Escuchar evento personalizado de reconexión
+        document.addEventListener("reconnect", (event) => {
+          console.log(event.detail.message);
+          document.getElementById("status").innerText = event.detail.message;
         });
       }
 
