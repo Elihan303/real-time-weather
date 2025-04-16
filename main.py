@@ -3,52 +3,46 @@ import asyncio
 import httpx
 import json
 import logging
-from database import async_session, WeatherReport 
+
+from database import async_session, WeatherReport  
 
 API_KEY = ""  # Coloca tu API Key de OpenWeatherMap
 app = FastAPI()
 
-# Límite de conexiones simultáneas
-MAX_CONNECTIONS = 2
-semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+class ConnectionManager:
+    def __init__(self, max_connections: int):
+        self.active_connections: list[WebSocket] = []
+        self.lock = asyncio.Lock()  
+        self.semaphore = asyncio.Semaphore(max_connections)  
+
+    async def connect(self, websocket: WebSocket):
+        await self.semaphore.acquire()
+        await websocket.accept()
+        async with self.lock:
+            self.active_connections.append(websocket)
+            logger.info(f"Conexión aceptada. Conexiones activas: {len(self.active_connections)}")
+
+    async def disconnect(self, websocket: WebSocket):
+        async with self.lock:
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
+                logger.info(f"Conexión removida. Conexiones activas: {len(self.active_connections)}")
+        self.semaphore.release()
+
+    async def broadcast(self, message: str):
+        async with self.lock:
+            for connection in self.active_connections:
+                await connection.send_text(message)
+
+manager = ConnectionManager(max_connections=2)
 
 
-app = FastAPI()
-
-async def handle_websocket_connection(websocket: WebSocket, connection_count: int = 0):
-    try:
-        data = await websocket.receive_text()
-        location = json.loads(data)
-        weather_data = await fetch_weather(location["lat"], location["lon"])
-        if "error" in weather_data:
-            await websocket.send_json({"error": f"Failed to fetch weather data {weather_data['error']}"})
-        else:
-            await websocket.send_json(weather_data)
-            # Guardar el reporte en la base de datos
-            await save_weather_data(weather_data, location["lat"], location["lon"])
-            # Emitir evento de guardado exitoso
-            await websocket.send_json({"event": "weather_saved", "message": "Reporte de clima guardado exitosamente."})
-        logger.info("Datos del clima enviados y guardados.")
-        await handle_websocket_connection(websocket, connection_count + 1)
-
-    except WebSocketDisconnect:
-        logger.info("Conexión WebSocket cerrada.")
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decodificando JSON: {e}")
-        await websocket.send_json({"error": "Formato JSON inválido"})
-    except Exception as e:
-        logger.error(f"Error en WebSocket: {e}")
-        await websocket.send_json({"error": "Internal server error"})
-    finally:
-        semaphore.release()
-        logger.info(f"Conexión WebSocket liberada. Conexiones activas: {MAX_CONNECTIONS - semaphore._value}")
-        
-# Función para obtener el clima
 async def fetch_weather(lat: float, lon: float):
-    await asyncio.sleep(1)  # Simula latencia
+    await asyncio.sleep(1)  
     URL = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&units=metric&appid={API_KEY}"
     async with httpx.AsyncClient() as client:
         try:
@@ -65,7 +59,6 @@ async def fetch_weather(lat: float, lon: float):
             logger.error(f"Unexpected error: {e}")
             return {"error": "Unexpected error"}
 
-# Función para guardar el reporte en la base de datos
 async def save_weather_data(weather_data: dict, lat: float, lon: float):
     try:
         async with async_session() as session:
@@ -82,23 +75,25 @@ async def save_weather_data(weather_data: dict, lat: float, lon: float):
     except Exception as e:
         logger.error(f"Error guardando en la BD: {e}")
 
-# Manejo recursivo de conexiones WebSocket
-async def handle_websocket_connection(websocket: WebSocket, connection_count: int = 0):
-    try:
-        data = await websocket.receive_text()
-        location = json.loads(data)
-        weather_data = await fetch_weather(location["lat"], location["lon"])
-        if "error" in weather_data:
-            await websocket.send_json({"error": f"Failed to fetch weather data {weather_data['error']}"})
-        else:
-            await websocket.send_json(weather_data)
-            # Guardar el reporte en la base de datos
-            await save_weather_data(weather_data, location["lat"], location["lon"])
-        logger.info("Datos del clima enviados y guardados.")
-        await handle_websocket_connection(websocket, connection_count + 1)
 
+async def handle_websocket(websocket: WebSocket):
+    try:
+        while True:
+            data = await websocket.receive_text()
+            location = json.loads(data)
+            weather_data = await fetch_weather(location["lat"], location["lon"])
+            if "error" in weather_data:
+                await websocket.send_json({"error": f"Failed to fetch weather data: {weather_data['error']}"})
+            else:
+                # Enviar los datos del clima al cliente
+                await websocket.send_json(weather_data)
+                # Guardar el reporte en la base de datos
+                await save_weather_data(weather_data, location["lat"], location["lon"])
+                # Notificar al cliente que el reporte se guardó exitosamente
+                await websocket.send_json({"event": "weather_saved", "message": "Reporte de clima guardado exitosamente."})
+            logger.info("Datos del clima enviados y guardados.")
     except WebSocketDisconnect:
-        logger.info("Conexión WebSocket cerrada.")
+        logger.info("Conexión WebSocket cerrada por el cliente.")
     except json.JSONDecodeError as e:
         logger.error(f"Error decodificando JSON: {e}")
         await websocket.send_json({"error": "Formato JSON inválido"})
@@ -106,22 +101,22 @@ async def handle_websocket_connection(websocket: WebSocket, connection_count: in
         logger.error(f"Error en WebSocket: {e}")
         await websocket.send_json({"error": "Internal server error"})
     finally:
-        semaphore.release()
-        logger.info(f"Conexión WebSocket liberada. Conexiones activas: {MAX_CONNECTIONS - semaphore._value}")
+        # Notificar al monitor que la conexión se libera
+        await manager.disconnect(websocket)
+        logger.info("Conexión liberada a través del monitor.")
+
 
 @app.websocket("/ws/weather")
 async def weather_endpoint(websocket: WebSocket):
-    if semaphore.locked():
-        await websocket.accept()
-        await websocket.send_json({"error": "max_connections_reached"})
+    try:
+        # El monitor (ConnectionManager) controla la conexión
+        await manager.connect(websocket)
+    except Exception as e:
+        logger.error(f"Error al conectar: {e}")
         await websocket.close()
-        logger.warning("Máximo de conexiones alcanzado. Rechazando solicitud.")
         return
 
-    await semaphore.acquire()
-    await websocket.accept()
-    logger.info(f"Nueva conexión aceptada. Conexiones activas: {MAX_CONNECTIONS - semaphore._value}")
-    await handle_websocket_connection(websocket)
+    await handle_websocket(websocket)
 
 @app.get("/status")
 def status():
